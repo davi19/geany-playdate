@@ -29,6 +29,18 @@ static void free_job(PDBuildJob *job)
 }
 
 
+/*
+ * pdc resolves import "CoreLibs/..." via PLAYDATE_SDK_PATH. Always pass it
+ * explicitly so the build works even when Geany was started without the var
+ * (prefs SDK path is enough).
+ */
+static gchar **make_sdk_env(const gchar *sdk)
+{
+	gchar **env = g_environ_setenv(g_get_environ(), "PLAYDATE_SDK_PATH", sdk, TRUE);
+	return env;
+}
+
+
 static gchar *build_pdc_command(const PDConfig *cfg, const gchar *sdk,
 	const gchar *source, const gchar *output)
 {
@@ -61,6 +73,7 @@ static gboolean launch_simulator(const gchar *sdk, const gchar *output)
 	GError *error = NULL;
 	gboolean ok;
 	gchar **argv;
+	gchar **envp;
 
 #ifdef G_OS_WIN32
 	sim = g_build_filename(sdk, "bin", "PlaydateSimulator.exe", NULL);
@@ -81,14 +94,17 @@ static gboolean launch_simulator(const gchar *sdk, const gchar *output)
 	else
 		argv = (gchar *[]){ sim, NULL };
 
+	envp = make_sdk_env(sdk);
+
 	/* Detach: the simulator is long-lived. */
-	ok = spawn_async(NULL, NULL, argv, NULL, NULL, &error);
+	ok = spawn_async(NULL, NULL, argv, envp, NULL, &error);
 	if (!ok && error != NULL)
 	{
 		msgwin_compiler_add(COLOR_RED, _("Playdate: failed to start simulator: %s"), error->message);
 		g_error_free(error);
 	}
 
+	g_strfreev(envp);
 	g_free(sim);
 	return ok;
 }
@@ -221,19 +237,25 @@ void pd_build_project(PDData *data, gboolean run_after)
 	msgwin_compiler_add(COLOR_BLACK, _("Playdate: %s"), cmd);
 	ui_set_statusbar(TRUE, _("Playdate: building %s …"), source);
 
-	if (!spawn_with_callbacks(NULL, cmd, NULL, NULL,
-			SPAWN_ASYNC | SPAWN_LINE_BUFFERED,
-			NULL, NULL,
-			on_pdc_stdout, NULL, 0,
-			on_pdc_stdout, NULL, 0,
-			on_pdc_exit, job, &pid, &error))
 	{
-		msgwin_compiler_add(COLOR_RED, _("Playdate: failed to run pdc: %s"),
-			error ? error->message : "?");
-		if (error)
-			g_error_free(error);
-		pd_errors_end(1);
-		free_job(job);
+		gchar **envp = make_sdk_env(sdk);
+
+		if (!spawn_with_callbacks(NULL, cmd, NULL, envp,
+				SPAWN_ASYNC | SPAWN_LINE_BUFFERED,
+				NULL, NULL,
+				on_pdc_stdout, NULL, 0,
+				on_pdc_stdout, NULL, 0,
+				on_pdc_exit, job, &pid, &error))
+		{
+			msgwin_compiler_add(COLOR_RED, _("Playdate: failed to run pdc: %s"),
+				error ? error->message : "?");
+			if (error)
+				g_error_free(error);
+			pd_errors_end(1);
+			free_job(job);
+		}
+
+		g_strfreev(envp);
 	}
 
 	g_free(cmd);

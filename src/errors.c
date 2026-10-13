@@ -55,11 +55,11 @@ static void emit(const gchar *severity, const gchar *file, gint line, const gcha
 
 
 /*
- * Parse one line of pdc stdout/stderr.
- * Patterns (from midouest/vscode-playdate-debug):
- *   ^(warning|error):\s+(.*):(\d+):\s+(.*)$
- *   ^(error):\s+(.*)$
- * Also accept already-Geany-formatted "file:line: msg" passthrough.
+ * pdc formats we accept (both observed in the wild):
+ *   file:line: error: message          ← actual pdc output
+ *   file:line: warning: message
+ *   error: file:line: message          ← midouest problem-matcher style
+ *   error: message
  */
 void pd_errors_parse_line(const gchar *line)
 {
@@ -74,7 +74,6 @@ void pd_errors_parse_line(const gchar *line)
 	g_strchomp(work);
 	p = work;
 
-	/* strip leading whitespace */
 	while (*p == ' ' || *p == '\t')
 		p++;
 
@@ -84,90 +83,121 @@ void pd_errors_parse_line(const gchar *line)
 		return;
 	}
 
-	/* severity: rest */
+	/* --- midouest style: severity first --- */
 	if (g_str_has_prefix(p, "warning:"))
 	{
 		severity = "warning";
 		p += 8;
 	}
-	else if (g_str_has_prefix(p, "error:"))
+	else if (g_str_has_prefix(p, "error:") ||
+	         g_str_has_prefix(p, "Error:") ||
+	         g_str_has_prefix(p, "ERROR:"))
 	{
 		severity = "error";
 		p += 6;
 	}
-	else if (g_str_has_prefix(p, "Error:") || g_str_has_prefix(p, "ERROR:"))
-	{
-		severity = "error";
-		p += 6;
-	}
-
-	while (*p == ' ' || *p == '\t')
-		p++;
 
 	if (severity != NULL)
 	{
-		/* Try FILE:LINE: MESSAGE */
-		gchar *last_colon = strrchr(p, ':');
-		gchar *first_colon = strchr(p, ':');
+		while (*p == ' ' || *p == '\t')
+			p++;
 
-		/* Find the colon before the line number: prefer the pattern path:NNN: msg */
-		if (first_colon != NULL)
+		/* try file:line: message */
 		{
-			gchar *rest;
-			gchar *end = NULL;
-			gint line_no;
+			gchar *c = p;
 			gboolean ok = FALSE;
 
-			/* Scan for a ":<digits>: " or ":<digits>:" pattern.
-			 * Use the last colon before a numeric field as the line separator. */
+			while ((c = strchr(c, ':')) != NULL)
 			{
-				gchar *c = p;
-				while ((c = strchr(c, ':')) != NULL)
+				gchar *num_start = c + 1;
+				gchar *num_end = NULL;
+				gint line_no = (gint) g_ascii_strtoll(num_start, &num_end, 10);
+
+				if (num_end > num_start &&
+				    (*num_end == ':' || *num_end == ' ' || *num_end == '\t' || *num_end == '\0'))
 				{
-					gchar *num_start = c + 1;
-					gchar *num_end = NULL;
-					gint n = (gint) g_ascii_strtoll(num_start, &num_end, 10);
+					gchar *rest = num_end;
+					if (*rest == ':')
+						rest++;
+					while (*rest == ' ' || *rest == '\t')
+						rest++;
 
-					if (num_end > num_start && (*num_end == ':' || *num_end == ' ' || *num_end == '\0'))
 					{
-						/* likely path:line */
-						line_no = n;
-						rest = num_end;
-						if (*rest == ':')
-							rest++;
-						while (*rest == ' ' || *rest == '\t')
-							rest++;
-
-						{
-							gchar *file = g_strndup(p, (gsize) (c - p));
-							emit(severity, file, line_no, rest);
-							g_free(file);
-							ok = TRUE;
-						}
-						break;
+						gchar *file = g_strndup(p, (gsize) (c - p));
+						emit(severity, file, line_no, rest);
+						g_free(file);
+						ok = TRUE;
 					}
-					c++;
+					break;
 				}
+				c++;
 			}
 
-			/* fallback: no line number found */
 			if (!ok)
 				emit(severity, NULL, 0, p);
-
-			(void) last_colon;
-			(void) first_colon;
-			(void) end;
-		}
-		else
-		{
-			emit(severity, NULL, 0, p);
 		}
 
 		g_free(work);
 		return;
 	}
 
-	/* Passthrough for non-pdc noise (still useful in Compiler tab). */
+	/* --- pdc style: file:line: severity: message --- */
+	{
+		gchar *sev_err = strstr(p, ": error:");
+		gchar *sev_warn = strstr(p, ": warning:");
+		gchar *sev = NULL;
+		const gchar *kind = NULL;
+
+		if (sev_err != NULL)
+		{
+			sev = sev_err;
+			kind = "error";
+		}
+		else if (sev_warn != NULL)
+		{
+			sev = sev_warn;
+			kind = "warning";
+		}
+
+		if (sev != NULL)
+		{
+			/* expect file:line before the severity token */
+			gchar *c = p;
+			gboolean ok = FALSE;
+
+			while ((c = strchr(c, ':')) != NULL && c < sev)
+			{
+				gchar *num_start = c + 1;
+				gchar *num_end = NULL;
+				gint line_no = (gint) g_ascii_strtoll(num_start, &num_end, 10);
+
+				if (num_end > num_start && num_end <= sev &&
+				    (*num_end == ':' || *num_end == ' ' || *num_end == '\t'))
+				{
+					gchar *msg = sev + strlen(kind) + 2; /* skip ": error:" / ": warning:" */
+					while (*msg == ' ' || *msg == '\t')
+						msg++;
+
+					{
+						gchar *file = g_strndup(p, (gsize) (c - p));
+						emit(kind, file, line_no, msg);
+						g_free(file);
+						ok = TRUE;
+					}
+					break;
+				}
+				c++;
+			}
+
+			if (!ok)
+				emit(kind, NULL, 0, p);
+
+			g_free(work);
+			return;
+		}
+	}
+
+	/* passthrough for non-pdc noise */
 	msgwin_compiler_add_string(COLOR_BLACK, work);
 	msg_count++;
 	g_free(work);
