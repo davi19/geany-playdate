@@ -72,7 +72,9 @@ static gboolean launch_simulator(const gchar *sdk, const gchar *output)
 	gchar *sim;
 	GError *error = NULL;
 	gboolean ok;
-	gchar **argv;
+	/* Named array: a compound literal here is a dangling temporary after the
+	 * assignment (GCC -O2), so argv[0] is stack garbage and spawn returns ENOENT. */
+	gchar *argv[3];
 	gchar **envp;
 
 #ifdef G_OS_WIN32
@@ -81,7 +83,7 @@ static gboolean launch_simulator(const gchar *sdk, const gchar *output)
 	sim = g_build_filename(sdk, "bin", "PlaydateSimulator", NULL);
 #endif
 
-	if (!g_file_test(sim, G_FILE_TEST_EXISTS))
+	if (!g_file_test(sim, G_FILE_TEST_IS_EXECUTABLE) || g_file_test(sim, G_FILE_TEST_IS_DIR))
 	{
 		msgwin_compiler_add(COLOR_RED, _("Playdate: simulator not found: %s"), sim);
 		ui_set_statusbar(FALSE, _("Playdate: simulator not found"));
@@ -89,10 +91,9 @@ static gboolean launch_simulator(const gchar *sdk, const gchar *output)
 		return FALSE;
 	}
 
-	if (output != NULL)
-		argv = (gchar *[]){ sim, (gchar *) output, NULL };
-	else
-		argv = (gchar *[]){ sim, NULL };
+	argv[0] = sim;
+	argv[1] = (gchar *) output;
+	argv[2] = NULL;
 
 	envp = make_sdk_env(sdk);
 
@@ -100,7 +101,8 @@ static gboolean launch_simulator(const gchar *sdk, const gchar *output)
 	ok = spawn_async(NULL, NULL, argv, envp, NULL, &error);
 	if (!ok && error != NULL)
 	{
-		msgwin_compiler_add(COLOR_RED, _("Playdate: failed to start simulator: %s"), error->message);
+		msgwin_compiler_add(COLOR_RED, _("Playdate: failed to start simulator: %s (%s)"),
+			error->message, sim);
 		g_error_free(error);
 	}
 
